@@ -6,7 +6,7 @@ import geotrellis.layer.stitch.TileLayoutStitcher
 import geotrellis.proj4.CRS
 import geotrellis.raster.mapalgebra.local._
 import io.minio.MinioClient
-import geotrellis.raster.resample.Bilinear
+import geotrellis.raster.resample.{Bilinear, PointResampleMethod}
 import geotrellis.raster.{reproject => _, _}
 import geotrellis.spark._
 import geotrellis.spark.pyramid.Pyramid
@@ -839,10 +839,18 @@ object Coverage {
   /**
    * Return the histogram of the coverage, a map of bin label value and its associated count.
    *
-   * @param coverage The coverage to which to compute the histogram.
+   * @param coverage The coverage to which to get the histogram.
+   * @param scale    The scale to which to resample the coverage before getting the histogram.
    * @return
    */
-  def histogram(coverage: (RDD[(SpaceTimeBandKey, MultibandTile)], TileLayerMetadata[SpaceTimeKey])): Map[Int, Long] = {
+  def histogram(coverage: (RDD[(SpaceTimeBandKey, MultibandTile)], TileLayerMetadata[SpaceTimeKey]), scale: Int): Map[Int, Long] = {
+
+
+    val resampledRDD = coverage._1.map(t => {
+      val tile = t._2
+      val resampledTile = tile.resample(tile.cols * scale, tile.rows * scale)
+      (t._1, resampledTile)
+    })
 
     val histRDD: RDD[Histogram[Int]] = coverage._1.map(t => {
       t._2.histogram
@@ -853,7 +861,6 @@ object Coverage {
     histRDD.reduce((a, b) => {
       a.merge(b)
     }).binCounts().toMap[Int, Long]
-
   }
 
   /**
@@ -903,78 +910,84 @@ object Coverage {
   /**
    * 自定义重采样方法，功能有局限性，勿用
    *
-   * @param coverage     需要被重采样的图像
-   * @param sourceZoom   原图像的 Zoom 层级
-   * @param targetZoom   输出图像的 Zoom 层级
-   * @param mode         插值方法
-   * @param downSampling 是否下采样，如果sourceZoom > targetZoom，true则采样，false则不处理
-   * @return 和输入图像同类型的新图像
+   * @param coverage     // The coverage to resample
+   * @param targetZoom   // The zoom level to which to resample the coverage
+   * @param mode         // The resample method
+   * @param downSampling // Whether to downsample or upsample, default is true
+   * @return // The resampled coverage
    */
-  //  def resampleToTargetZoom(
-  //                            coverage: (RDD[(SpaceTimeBandKey, MultibandTile)], TileLayerMetadata[SpaceTimeKey]),
-  //                            targetZoom: Int,
-  //                            mode: String,
-  //                            downSampling: Boolean = true
-  //                          )
-  //  : (RDD[(SpaceTimeBandKey, MultibandTile)], TileLayerMetadata[SpaceTimeKey]) = {
-  //    val resampleMethod: PointResampleMethod = mode match {
-  //      case "Bilinear" => geotrellis.raster.resample.Bilinear
-  //      case "CubicConvolution" => geotrellis.raster.resample.CubicConvolution
-  //      case _ => geotrellis.raster.resample.NearestNeighbor
-  //    }
-  //
-  //    // 求解出原始影像的zoom
-  //    //    val myAcc2: LongAccumulator = sc.longAccumulator("myAcc2")
-  //    //    //    println("srcAcc0 = " + myAcc2.value)
-  //    //
-  //    //    reprojected.map(t => {
-  //    //
-  //    //
-  //    //      //          println("srcRows = " + t._2.rows) 256
-  //    //      //          println("srcRows = " + t._2.cols) 256
-  //    //      myAcc2.add(1)
-  //    //      t
-  //    //    }).collect()
-  //    //    println("srcNumOfTiles = " + myAcc2.value) // 234
-  //    //
-  //    //
-  //
-  //    val level: Int = COGUtil.tileDifference
-  //    println("tileDifference = " + level)
-  //    if (level > 0) {
-  //      val time1 = System.currentTimeMillis()
-  //      val coverageResampled: RDD[(SpaceTimeBandKey, Tile)] = coverage._1.map(t => {
-  //        (t._1, t._2.resample(t._2.cols * (1 << level), t._2.rows * (1 << level), resampleMethod))
-  //      })
-  //      val time2 = System.currentTimeMillis()
-  //      println("Resample Time is " + (time2 - time1))
-  //      (coverageResampled,
-  //        TileLayerMetadata(coverage._2.cellType, LayoutDefinition(
-  //          coverage._2.extent,
-  //          TileLayout(coverage._2.layoutCols, coverage._2.layoutRows,
-  //            coverage._2.tileCols * (1 << level), coverage._2.tileRows * (1 << level))
-  //        ), coverage._2.extent, coverage._2.crs, coverage._2.bounds))
-  //    }
-  //    else if (level < 0) {
-  //      val time1 = System.currentTimeMillis()
-  //      val coverageResampled: RDD[(SpaceTimeBandKey, Tile)] = coverage._1.map(t => {
-  //        val tileResampled: Tile = t._2.resample(Math.ceil(t._2.cols.toDouble / (1 << -level)).toInt, Math.ceil(t._2.rows.toDouble / (1 << -level)).toInt, resampleMethod)
-  //        (t._1, tileResampled)
-  //      })
-  //      val time2 = System.currentTimeMillis()
-  //      println("Resample Time is " + (time2 - time1))
-  //      (coverageResampled, TileLayerMetadata(coverage._2.cellType, LayoutDefinition(coverage._2.extent, TileLayout(coverage._2.layoutCols, coverage._2.layoutRows, coverage._2.tileCols / (1 << -level),
-  //        coverage._2.tileRows / (1 << -level))), coverage._2.extent, coverage._2.crs, coverage._2.bounds))
-  //      println("coverage._2.tileCols.toDouble = " + coverage._2.tileCols.toDouble)
-  //      (coverageResampled,
-  //        TileLayerMetadata(coverage._2.cellType, LayoutDefinition(
-  //          coverage._2.extent,
-  //          TileLayout(coverage._2.layoutCols, coverage._2.layoutRows,
-  //            Math.ceil(coverage._2.tileCols.toDouble / (1 << -level)).toInt, Math.ceil(coverage._2.tileRows.toDouble / (1 << -level)).toInt)),
-  //          coverage._2.extent, coverage._2.crs, coverage._2.bounds))
-  //    }
-  //    else coverage
-  //  }
+  def resampleToTargetZoom(
+                            coverage: (RDD[(SpaceTimeBandKey, MultibandTile)], TileLayerMetadata[SpaceTimeKey]),
+                            targetZoom: Int,
+                            mode: String,
+                            downSampling: Boolean = true
+                          )
+  : (RDD[(SpaceTimeBandKey, MultibandTile)], TileLayerMetadata[SpaceTimeKey]) = {
+    val resampleMethod: PointResampleMethod = mode match {
+      case "Bilinear" => geotrellis.raster.resample.Bilinear
+      case "CubicConvolution" => geotrellis.raster.resample.CubicConvolution
+      case _ => geotrellis.raster.resample.NearestNeighbor
+    }
+
+    // 求解出原始影像的zoom
+    //    val myAcc2: LongAccumulator = sc.longAccumulator("myAcc2")
+    //    //    println("srcAcc0 = " + myAcc2.value)
+    //
+    //    reprojected.map(t => {
+    //
+    //
+    //      //          println("srcRows = " + t._2.rows) 256
+    //      //          println("srcRows = " + t._2.cols) 256
+    //      myAcc2.add(1)
+    //      t
+    //    }).collect()
+    //    println("srcNumOfTiles = " + myAcc2.value) // 234
+
+
+    val level: Int = COGUtil.tileDifference
+    println("tileDifference = " + level)
+    if (level > 0) {
+      val time1 = System.currentTimeMillis()
+      val coverageResampled: RDD[(SpaceTimeBandKey, MultibandTile)] = coverage._1.map(t => {
+        (t._1, t._2.resample(t._2.cols * (1 << level), t._2.rows * (1 << level), resampleMethod))
+      })
+      val time2 = System.currentTimeMillis()
+      println("Resample Time is " + (time2 - time1))
+      (coverageResampled,
+        TileLayerMetadata(coverage._2.cellType, LayoutDefinition(
+          coverage._2.extent,
+          TileLayout(coverage._2.layoutCols, coverage._2.layoutRows,
+            coverage._2.tileCols * (1 << level), coverage._2.tileRows * (1 << level))
+        ), coverage._2.extent, coverage._2.crs, coverage._2.bounds))
+    }
+    else if (level < 0) {
+      val time1 = System.currentTimeMillis()
+      val coverageResampled: RDD[(SpaceTimeBandKey, MultibandTile)] = coverage._1.map(t => {
+
+        val cols = if ((t._2.cols / (1 << -level)) > 1) Math.ceil(t._2.cols.toDouble / (1 << -level)).toInt else 1
+        val rows = if ((t._2.rows / (1 << -level)) > 1) Math.ceil(t._2.rows.toDouble / (1 << -level)).toInt else 1
+        val tileResampled: MultibandTile = t._2.resample(cols, rows, resampleMethod)
+        (t._1, tileResampled)
+      })
+
+
+      var tileCols = if ((coverage._2.tileCols / (1 << -level)) > 1) Math.ceil(coverage._2.tileCols.toDouble / (1 << -level)).toInt else 1
+      var tileRows = if ((coverage._2.tileRows / (1 << -level)) > 1) Math.ceil(coverage._2.tileRows.toDouble / (1 << -level)).toInt else 1
+
+
+      val time2 = System.currentTimeMillis()
+      println("Resample Time is " + (time2 - time1))
+      //      (coverageResampled, TileLayerMetadata(coverage._2.cellType, LayoutDefinition(coverage._2.extent, TileLayout(coverage._2.layoutCols, coverage._2.layoutRows, coverage._2.tileCols / (1 << -level),
+      //        coverage._2.tileRows / (1 << -level))), coverage._2.extent, coverage._2.crs, coverage._2.bounds))
+
+
+      println("coverage._2.tileCols.toDouble = " + coverage._2.tileCols.toDouble)
+      (coverageResampled, TileLayerMetadata(coverage._2.cellType, LayoutDefinition(
+        coverage._2.extent, TileLayout(coverage._2.layoutCols, coverage._2.layoutRows, tileCols, tileRows)),
+        coverage._2.extent, coverage._2.crs, coverage._2.bounds))
+    }
+    else coverage
+  }
 
 
   /**
